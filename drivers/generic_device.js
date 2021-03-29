@@ -20,7 +20,7 @@ along with com.gruijter.hyundai_kia. If not, see <http://www.gnu.org/licenses/>.
 'use strict';
 
 const Homey = require('homey');
-const Bluelink = require('bluelinky');
+// const Bluelink = require('bluelinky');
 const Uvo = require('kuvork');
 const GeoPoint = require('geopoint');
 const util = require('util');
@@ -87,12 +87,16 @@ class CarDevice extends Homey.Device {
 				password: this.settings.password,
 				region: this.settings.region,
 				pin: this.settings.pin,
+				// vin: this.settings.vin,
+				brand: this.ds.deviceId === 'bluelink' ? 'H' : 'K',
 				deviceUuid: Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15), // 'homey',
 				autoLogin: false,
 			};
-			if (this.ds.deviceId === 'bluelink') {
-				this.client = new Bluelink(options);
-			} else this.client = new Uvo(options);
+			// if (this.ds.deviceId === 'bluelink') {
+			// 	this.client = new Bluelink(options);
+			// } else this.client = new Uvo(options);
+
+			this.client = new Uvo(options);
 
 			this.client.on('error', async (error) => {
 				this.error(error);
@@ -149,6 +153,8 @@ class CarDevice extends Homey.Device {
 			if (!this.allListeners) this.registerListeners();
 
 			// start polling
+			this.enQueue({ command: 'doPoll', args: false });
+			await setTimeoutPromise(15 * 1000, 'waiting is done');
 			this.enQueue({ command: 'doPoll', args: true });
 			this.startPolling(this.settings.pollInterval);
 
@@ -209,7 +215,7 @@ class CarDevice extends Homey.Device {
 					throw Error('pausing queue; not logged in');
 				}
 				const itemWait = {
-					doPoll: 1,
+					doPoll: 5,
 					start: 65,
 					stop: 5,
 					lock: 5,
@@ -283,6 +289,7 @@ class CarDevice extends Homey.Device {
 	async doPoll(forceOnce) {
 		// console.log(forceOnce);
 		try {
+			const firstPoll = !this.lastStatus;
 			let status = this.lastStatus;
 			let location = this.lastLocation;
 			let odometer = this.lastOdometer;
@@ -294,9 +301,9 @@ class CarDevice extends Homey.Device {
 				// max. 24hrs forced poll @5 min & 100% charge
 			const batSoCGood = status && status.battery ? (status.battery.batSoc > this.settings.batteryAlarmLevel) : true;
 			const refresh = this.pollMode	// 1 = engineOn with refresh
-				|| (batSoCGood && (forceOnce || forcePollInterval || !status || !location || !odometer));
+				|| (batSoCGood && (forceOnce || forcePollInterval)); // || !status || !location || !odometer));
 
-			const advanced = typeof this.vehicle.fullStatus === 'function';
+			const advanced = typeof this.vehicle.fullStatus === 'function'; // works for EU vehicles only
 
 			if (!refresh) { // get info from server
 				if (advanced) { // get status, location, odo meter from server
@@ -306,21 +313,23 @@ class CarDevice extends Homey.Device {
 					});
 					// console.log(fullStatus);
 					status = fullStatus.vehicleStatus;
-					if (status.time !== this.lastStatus.time) {
+					if (this.lastStatus && status.time !== this.lastStatus.time) {
 						this.log('Server info changed.', this.lastStatus.time, status.time);
 						// if (status.sleepModeCheck) console.log(this.getName(), 'sleepModeCheck is true. Car just parked?');
 						this.lastRefresh = Date.now();
 					}
 					this.lastStatus = status;
-					location = {
-						latitude: fullStatus.vehicleLocation.coord.lat,
-						longitude: fullStatus.vehicleLocation.coord.lon,
-						altitude: fullStatus.vehicleLocation.coord.alt,
-						speed: fullStatus.vehicleLocation.speed,
-						heading: fullStatus.vehicleLocation.head,
-					};
+					if (fullStatus.vehicleLocation) {
+						location = {
+							latitude: fullStatus.vehicleLocation.coord.lat,
+							longitude: fullStatus.vehicleLocation.coord.lon,
+							altitude: fullStatus.vehicleLocation.coord.alt,
+							speed: fullStatus.vehicleLocation.speed,
+							heading: fullStatus.vehicleLocation.head,
+						};
+					}
 					this.lastLocation = location;
-					odometer = fullStatus.odometer;
+					odometer = fullStatus.odometer || odometer;
 					this.lastOdometer = odometer;
 				} else { // get status from server
 					status = await this.vehicle.status({
@@ -351,15 +360,17 @@ class CarDevice extends Homey.Device {
 					});
 					status = fullStatus.vehicleStatus;
 					this.lastStatus = status;
-					location = {
-						latitude: fullStatus.vehicleLocation.coord.lat,
-						longitude: fullStatus.vehicleLocation.coord.lon,
-						altitude: fullStatus.vehicleLocation.coord.alt,
-						speed: fullStatus.vehicleLocation.speed,
-						heading: fullStatus.vehicleLocation.head,
-					};
+					if (fullStatus.vehicleLocation) {
+						location = {
+							latitude: fullStatus.vehicleLocation.coord.lat,
+							longitude: fullStatus.vehicleLocation.coord.lon,
+							altitude: fullStatus.vehicleLocation.coord.alt,
+							speed: fullStatus.vehicleLocation.speed,
+							heading: fullStatus.vehicleLocation.head,
+						};
+					} else location = await this.vehicle.location();
 					this.lastLocation = location;
-					odometer = fullStatus.odometer;
+					odometer = fullStatus.odometer ? fullStatus.odometer : await this.vehicle.odometer();
 					this.lastOdometer = odometer;
 				} else {
 					// get status from car
@@ -376,13 +387,14 @@ class CarDevice extends Homey.Device {
 					this.lastOdometer = odometer;
 				}
 
-				// log data on app init
-				if (!this.lastRefresh) {
-					this.log(JSON.stringify(status)); // util.inspect(status, true, 10, true));
-					this.log(JSON.stringify(location)); // util.inspect(location, true, 10, true));
-					this.log(JSON.stringify(odometer)); // util.inspect(odometer, true, 10, true));
-				}
 				this.lastRefresh = Date.now();
+			}
+
+			// log data on app init
+			if (firstPoll) {
+				this.log(JSON.stringify(status)); // util.inspect(status, true, 10, true));
+				this.log(JSON.stringify(location)); // util.inspect(location, true, 10, true));
+				this.log(JSON.stringify(odometer)); // util.inspect(odometer, true, 10, true));
 			}
 
 			// fix charger state after refresh
@@ -816,6 +828,30 @@ class CarDevice extends Homey.Device {
 module.exports = CarDevice;
 
 /*
+Kia Ceed ICE:
+{
+	"airCtrlOn":false,
+	"engine":false,
+	"doorLock":true,"doorOpen":{"frontLeft":0,"frontRight":0,"backLeft":0,"backRight":0},
+	"trunkOpen":false,
+	"airTemp":{"value":"01H","unit":0,"hvacTempType":1},
+	"defrost":false,
+	"lowFuelLight":false,
+	"acc":false,
+	"hoodOpen":false,
+	"steerWheelHeat":0,
+	"sideBackWindowHeat":0,
+	"dte":{"value":405,"unit":1},
+	"tirePressureLamp":{"tirePressureLampAll":0,"tirePressureLampFL":0,"tirePressureLampFR":0,"tirePressureLampRL":0,"tirePressureLampRR":0},
+	"battery":{"batSoc":81,"batState":0},
+	"time":"20210313185232"
+}
+2021-03-13 21:30:01 [log] [ManagerDrivers] [uvo] [0] {"latitude":51.589264,"longitude":5.340939,"altitude":0,"speed":{"value":0,"unit":0},"heading":0}
+2021-03-13 21:30:01 [log] [ManagerDrivers] [uvo] [0] {"value":11440.5,"unit":1}
+2021-03-13 21:30:01 [log] [ManagerDrivers] [uvo] [0] Error: out_of_range
+    at Remote Process
+ target_temperature 14.5
+
 // unparsed (door open, power on, start, after refresh on car):
 status : {
 	"airCtrlOn": true,
